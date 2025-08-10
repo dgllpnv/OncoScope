@@ -1,0 +1,38 @@
+{
+  "selected_features": [
+    "worst area",
+    "mean concave points",
+    "worst radius",
+    "worst perimeter",
+    "worst concave points",
+    "area error",
+    "mean concavity",
+    "worst texture",
+    "worst concavity",
+    "radius error"
+  ],
+  "benign_median": [
+    547.4,
+    0.02344,
+    13.35,
+    86.92,
+    0.07431,
+    19.63,
+    0.03709,
+    22.82,
+    0.1412,
+    0.2575
+  ],
+  "malignant_median": [
+    1303.0,
+    0.08628,
+    20.59,
+    138.0,
+    0.182,
+    58.455,
+    0.15134999999999998,
+    28.945,
+    0.4049,
+    0.5472
+  ]
+}

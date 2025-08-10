@@ -1,23 +1,39 @@
 import os
+import re
 import math
+import uuid
+import json
 from pathlib import Path
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict, Any
 
 import joblib
 import pandas as pd
 from dotenv import load_dotenv
 
-# Carrega variáveis do .env (THRESHOLD, OPENAI_API_KEY, etc.)
+# ------------------ ENV & Caminhos ------------------
 load_dotenv()
 
-# Caminhos
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODEL_PATH = BASE_DIR / "models" / "best_model.pkl"
+SELECTED_FEATURES_PATH = BASE_DIR / "models" / "selected_features.json"
 
-# Threshold de decisão (padrão 0.5)
 THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))
+MALIGNANT_CLASS = os.getenv("MALIGNANT_CLASS", "1").strip()
 
-# Ordem "canônica" das 30 features do WDBC (ajuste se seu treino usou outra ordem)
+# Carrega TOP10_FEATURES dinamicamente do JSON
+if SELECTED_FEATURES_PATH.exists():
+    try:
+        with open(SELECTED_FEATURES_PATH, "r", encoding="utf-8") as f:
+            TOP10_FEATURES = json.load(f).get("selected_features", [])
+        if not TOP10_FEATURES:
+            raise RuntimeError(f"O arquivo {SELECTED_FEATURES_PATH} não contém 'selected_features'.")
+        print(f"[OncoScope] TOP10_FEATURES carregadas: {TOP10_FEATURES}")
+    except Exception as e:
+        raise RuntimeError(f"Erro ao ler {SELECTED_FEATURES_PATH}: {e}")
+else:
+    raise FileNotFoundError(f"Arquivo {SELECTED_FEATURES_PATH} não encontrado. Treine o modelo antes.")
+
+# Ordem original das 30 features
 FEATURES_ORDER = [
     "mean radius","mean texture","mean perimeter","mean area","mean smoothness",
     "mean compactness","mean concavity","mean concave points","mean symmetry",
@@ -29,12 +45,10 @@ FEATURES_ORDER = [
     "worst symmetry","worst fractal dimension"
 ]
 
-# Cache do modelo
+# ------------------ Modelo (cache) ------------------
 _model = None
 
-
 def load_model():
-    """Carrega o .pkl uma única vez e mantém em cache."""
     global _model
     if _model is None:
         if not MODEL_PATH.exists():
@@ -42,111 +56,133 @@ def load_model():
         _model = joblib.load(MODEL_PATH)
     return _model
 
+# ------------------ Helpers ------------------
+_SPLIT = re.compile(r"[\s_\-/():]+", re.UNICODE)
 
-# ---------- Helpers para descobrir o que o modelo espera ----------
+def _canon(name: str) -> tuple:
+    toks = [t for t in _SPLIT.split(str(name).lower()) if t]
+    return tuple(sorted(toks))
+
+CANON_MAP = { _canon(k): k for k in FEATURES_ORDER + TOP10_FEATURES }
+LIKELY_EXTRA = {"id", "index", "idx", "diagnosis", "target", "label", "class"}
 
 def _expected_feature_names(model) -> Optional[List[str]]:
-    """
-    Tenta obter os nomes de features que o modelo viu no treino.
-    Procura em model.feature_names_in_ e, se for Pipeline, dentro dos steps.
-    """
     names = getattr(model, "feature_names_in_", None)
     if names is not None:
         return list(names)
-
-    # Evita dependência direta de sklearn.Pipeline
     steps = getattr(model, "steps", None)
     if steps:
         for _, step in steps:
             names = getattr(step, "feature_names_in_", None)
             if names is not None:
                 return list(names)
-
     return None
 
-
 def _expected_n_features(model) -> Optional[int]:
-    """
-    Descobre quantas features o modelo espera.
-    Prioriza n_features_in_, senão tenta pelo tamanho de feature_names_in_.
-    """
     n = getattr(model, "n_features_in_", None)
     if n is not None:
         return int(n)
-
     names = _expected_feature_names(model)
-    if names is not None:
-        return len(names)
+    return len(names) if names is not None else None
 
-    return None
+def _get_estimator_with_proba(model):
+    if hasattr(model, "predict_proba"):
+        return model
+    steps = getattr(model, "steps", None)
+    if steps:
+        for _, step in reversed(steps):
+            if hasattr(step, "predict_proba"):
+                return step
+    return model
 
+def _malignant_index(classes) -> int:
+    env = MALIGNANT_CLASS.lower()
+    try:
+        cls = list(classes)
+    except Exception:
+        cls = None
+    print(f"[OncoScope] classes_ do estimador final: {cls}")
+    if cls is not None:
+        for i, c in enumerate(cls):
+            if str(c).lower() in {env, "m", "maligno", "malignant", "1", "true"}:
+                return i
+        if len(cls) == 2:
+            for i, c in enumerate(cls):
+                if str(c).lower() in {"b", "benigno", "benign", "0", "false"}:
+                    return 1 - i
+        return len(cls) - 1
+    return 1
 
-# ---------- Predição estruturada ----------
+def _proba_maligno(model, X) -> float:
+    est = _get_estimator_with_proba(model)
+    proba = est.predict_proba(X)[0]
+    idx = _malignant_index(getattr(est, "classes_", None))
+    return float(proba[idx])
 
-def predict_structured(features: List[float]) -> Tuple[str, float]:
-    """
-    Recebe 30 floats (WDBC), monta um DataFrame compatível com o que o modelo espera
-    e retorna (diagnóstico, confiança).
-    - Se o modelo tiver sido treinado com uma coluna extra (ex.: id), preenche NaN
-      para o SimpleImputer tratar.
-    """
-    model = load_model()
-
+def _build_X(features: List[float], model) -> pd.DataFrame:
     expected_names = _expected_feature_names(model)
     expected_n = _expected_n_features(model)
 
+    print(f"[OncoScope] Recebidas {len(features)} features: {features}")
+
+    if len(features) != len(TOP10_FEATURES):
+        raise ValueError(f"Número incorreto de variáveis. Esperado {len(TOP10_FEATURES)}, recebi {len(features)}.")
+
     if expected_names:
-        # Mapeia pela *nomeação* que o modelo conhece (mais seguro para ColumnTransformer/Pipelines)
+        matched = 0
         data = {}
+        missing = []
+        # Criar mapa de nome → índice baseado no TOP10_FEATURES
+        top10_index_map = {name: idx for idx, name in enumerate(TOP10_FEATURES)}
+
         for name in expected_names:
-            if name in FEATURES_ORDER:
-                idx = FEATURES_ORDER.index(name)
-                data[name] = float(features[idx])
-            else:
-                # Coluna que não está nas 30 "oficiais" -> deixa NaN para o Imputer
+            key = _canon(name)
+            if any(tok in LIKELY_EXTRA for tok in key):
                 data[name] = math.nan
-        X = pd.DataFrame([data], columns=expected_names)
+                continue
+            if key in CANON_MAP:
+                ref_name = CANON_MAP[key]
+                if ref_name in top10_index_map:
+                    idx = top10_index_map[ref_name]
+                    data[name] = float(features[idx])
+                    matched += 1
+                else:
+                    # Caso a coluna não esteja nas top10, preenche com NaN
+                    data[name] = math.nan
+                    missing.append(name)
+            else:
+                data[name] = math.nan
+                missing.append(name)
+        print(f"[OncoScope] colunas esperadas: {len(expected_names)} | casadas: {matched} | faltando: {len(missing)}")
+        if missing:
+            print(f"[OncoScope] Faltando mapear: {missing}")
+        return pd.DataFrame([data], columns=expected_names)
 
-    else:
-        # Sem nomes conhecidos. Vamos pelo número esperado de colunas.
-        if expected_n is None:
-            # Último recurso: assume 30
-            expected_n = len(FEATURES_ORDER)
+    # Caso não tenha nomes, usa apenas as top10
+    if expected_n == len(TOP10_FEATURES):
+        return pd.DataFrame([features], columns=TOP10_FEATURES)
 
-        if expected_n == len(FEATURES_ORDER):
-            # 30 -> usa as 30 features na ordem canônica
-            X = pd.DataFrame([features], columns=FEATURES_ORDER)
+    if expected_n == len(FEATURES_ORDER):
+        return pd.DataFrame([features], columns=FEATURES_ORDER)
 
-        elif expected_n == len(FEATURES_ORDER) + 1 and len(features) == 30:
-            # Modelo espera 31, recebemos 30 -> adiciona 1 NaN (provável 'id' perdido)
-            vals = list(map(float, features)) + [math.nan]
-            cols = FEATURES_ORDER + ["_extra"]
-            X = pd.DataFrame([vals], columns=cols)
-        else:
-            raise ValueError(
-                f"Modelo espera {expected_n} features, mas recebi {len(features)}. "
-                "Ajuste o mapeamento ou re-treine removendo colunas extras."
-            )
+    raise ValueError(f"Modelo espera {expected_n} features, mas recebi {len(features)}.")
 
-    # Predição
-    if hasattr(model, "predict_proba"):
-        proba_maligno = float(model.predict_proba(X)[0][1])
+# ------------------ Predição ------------------
+def predict_structured(features: List[float]) -> Tuple[str, float]:
+    model = load_model()
+    X = _build_X(features, model)
+    est = _get_estimator_with_proba(model)
+    if hasattr(est, "predict_proba"):
+        proba_maligno = _proba_maligno(model, X)
         label = "Maligno" if proba_maligno >= THRESHOLD else "Benigno"
         confidence = proba_maligno if label == "Maligno" else 1.0 - proba_maligno
         return label, confidence
-
-    # Fallback para modelos sem predict_proba
     pred = int(model.predict(X)[0])
     label = "Maligno" if pred == 1 else "Benigno"
-    return label, 0.5  # confiança neutra se não há probabilidade
+    return label, 0.5
 
-
-# ---------- Chatbot (OpenAI com fallback) ----------
-
+# ------------------ OpenAI helper ------------------
 def _openai_client():
-    """
-    Retorna cliente OpenAI (lib v1.x). Se não houver API key, retorna None.
-    """
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
@@ -156,38 +192,117 @@ def _openai_client():
     except Exception:
         return None
 
-
+# ------------------ Chat ------------------
 def chat_with_user(diagnosis: str, confidence: float) -> str:
-    """
-    Mensagem curta e empática com base no diagnóstico.
-    Se não houver chave da OpenAI, usa fallback local.
-    """
     base_msg = (
         f"Resultado do modelo: {diagnosis} (confiança {confidence:.2%}). "
         "Isto é apoio à decisão e não substitui avaliação médica. "
     )
-
     client = _openai_client()
     if client is None:
         if diagnosis.lower() == "maligno":
-            return base_msg + "Procure seu médico o quanto antes. Você não está sozinho(a); estamos aqui para ajudar."
-        return base_msg + "O resultado sugere baixo risco. Mantenha acompanhamento e exames em dia."
-
+            return base_msg + (
+                "Entendo que isso possa gerar preocupação. Busque um médico especialista o quanto antes "
+                "e, se precisar, procure apoio psicológico. Você não está sozinho(a)."
+            )
+        return base_msg + (
+            "O resultado sugere baixo risco. Mantenha seus exames em dia e converse com seu médico para acompanhamento."
+        )
     prompt = (
         f"Diagnóstico do classificador: '{diagnosis}' (confiança {confidence:.2%}). "
-        "Escreva uma mensagem curta (máx. 60 palavras), empática, sem termos técnicos difíceis, "
-        "reforçando que a pessoa deve procurar um médico para orientação."
+        "Escreva uma mensagem curta (até 60 palavras), acolhedora, sem jargões, "
+        "reforçando procurar médico/apoio psicológico e evitando aconselhamento clínico específico."
     )
-
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Você é um assistente de saúde empático e responsável. Irá dar mensagens de apoio somente, e SEMPRE deve indicar procurar um médico, SEMPRE!"},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": _system_prompt(diagnosis, confidence)},
+                {"role": "user", "content": prompt},
             ],
-            temperature=0.7,
+            temperature=0.6,
         )
         return resp.choices[0].message.content.strip()
     except Exception:
-        return base_msg + "Nosso assistente virtual está indisponível no momento. Consulte seu médico para orientação."
+        return base_msg + "Nosso assistente está indisponível no momento. Procure um médico para orientação."
+
+_THREADS: Dict[str, Dict[str, Any]] = {}
+
+def _system_prompt(diagnosis: str, confidence: float) -> str:
+    return (
+        "Você é um assistente de acolhimento emocional, gentil e responsável. "
+        "Escopo estrito: falar apenas sobre cuidado com a saúde, acolhimento emocional, "
+        "buscar um médico especialista e opções de apoio psicológico. "
+        "NÃO forneça diagnósticos, tratamentos, doses ou interpretações de exame. "
+        f"Contexto do modelo: diagnóstico='{diagnosis}', confiança={confidence:.2%}. "
+        "Estilo: linguagem simples, empática, 50–80 palavras."
+    )
+
+def _first_message_offline(diagnosis: str, confidence: float) -> str:
+    if diagnosis.lower() == "maligno":
+        return (
+            f"Resultado do modelo: {diagnosis} (confiança {confidence:.2%}). "
+            "Procure um médico especialista e apoio psicológico. Você não está sozinho(a)."
+        )
+    return (
+        f"Resultado do modelo: {diagnosis} (confiança {confidence:.2%}). "
+        "Tendência de baixo risco, mas mantenha acompanhamento médico."
+    )
+
+def _reply_offline(user_text: str) -> str:
+    return (
+        "Entendo o que você compartilhou. Procure um médico especialista e, se necessário, apoio psicológico."
+    )
+
+def chat_start(diagnosis: str, confidence: float) -> Tuple[str, str]:
+    thread_id = uuid.uuid4().hex
+    sys = _system_prompt(diagnosis, confidence)
+    client = _openai_client()
+    if client is None:
+        first = _first_message_offline(diagnosis, confidence)
+    else:
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": sys},
+                    {"role": "user", "content": "Gere uma primeira mensagem de acolhimento."},
+                ],
+                temperature=0.6,
+            )
+            first = resp.choices[0].message.content.strip()
+        except Exception:
+            first = _first_message_offline(diagnosis, confidence)
+    _THREADS[thread_id] = {
+        "diagnosis": diagnosis,
+        "confidence": confidence,
+        "system": sys,
+        "messages": [
+            {"role": "system", "content": sys},
+            {"role": "assistant", "content": first},
+        ],
+    }
+    return first, thread_id
+
+def chat_continue(thread_id: str, user_text: str) -> Tuple[str, str]:
+    if thread_id not in _THREADS:
+        raise KeyError("thread_id inexistente")
+    state = _THREADS[thread_id]
+    state["messages"].append({"role": "user", "content": user_text})
+    client = _openai_client()
+    if client is None:
+        reply = _reply_offline(user_text)
+    else:
+        try:
+            history = state["messages"]
+            pruned = [history[0]] + history[-10:]
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=pruned,
+                temperature=0.5,
+            )
+            reply = resp.choices[0].message.content.strip()
+        except Exception:
+            reply = _reply_offline(user_text)
+    state["messages"].append({"role": "assistant", "content": reply})
+    return reply, thread_id

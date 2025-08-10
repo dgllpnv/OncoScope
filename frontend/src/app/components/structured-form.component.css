@@ -1,0 +1,102 @@
+
+.container {
+  max-width: 800px;
+  margin: 24px auto;
+  padding: 24px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-weight: 700;
+}
+
+.sub {
+  margin: 0 0 16px;
+  color: #666;
+}
+
+.actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.form-grid {
+  display: block;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.submit {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.result {
+  margin-top: 16px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.conf {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* ===== Estilização do chat ===== */
+.chat-box {
+  margin-top: 16px;
+  padding: 8px;
+  background: #f5f5f5;
+  border-radius: 8px;
+}
+
+.user-msg {
+  background: #d1e7dd;
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  text-align: right;
+  align-self: flex-end;
+  max-width: 80%;
+  word-wrap: break-word;
+}
+
+.bot-msg {
+  background: #ffffff;
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  text-align: left;
+  align-self: flex-start;
+  max-width: 80%;
+  word-wrap: break-word;
+  border: 1px solid #ddd;
+}
+
+.chat-input {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chat-input input {
+  flex: 1;
+}
+
+/* ===== Scroll suave para histórico longo ===== */
+.chat-box {
+  display: flex;
+  flex-direction: column;
+}

@@ -1,0 +1,14 @@
+{
+  "selected_features": [
+    "worst_radius",
+    "worst_texture",
+    "worst_perimeter",
+    "worst_area",
+    "worst_smoothness",
+    "mean_radius",
+    "mean_texture",
+    "mean_perimeter",
+    "mean_area",
+    "mean_concave_points"
+  ]
+}

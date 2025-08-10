@@ -1,0 +1,72 @@
+<mat-card class="container">
+  <h1>OncoScope – Análise Estruturada</h1>
+  <p class="sub">Preencha os 10 campos do exame e envie para análise.</p>
+
+  <div class="actions">
+    <button mat-stroked-button color="primary" (click)="fillExampleMal()" [disabled]="loading()">Exemplo Maligno</button>
+    <button mat-stroked-button color="accent" (click)="fillExampleBen()" [disabled]="loading()">Exemplo Benigno</button>
+    <button mat-button (click)="clear()" [disabled]="loading()">Limpar</button>
+  </div>
+
+  <form *ngIf="fields.length > 0" [formGroup]="form" (ngSubmit)="onSubmit()" class="form-grid" novalidate>
+    <div class="grid">
+      <ng-container *ngFor="let f of fields; trackBy: trackKey">
+        <mat-form-field appearance="outline">
+          <mat-label>{{ f.label }}</mat-label>
+          <input
+            matInput
+            type="number"
+            step="any"
+            inputmode="decimal"
+            [placeholder]="f.hint"
+            [formControlName]="f.key" />
+          <mat-error *ngIf="form.get(f.key)?.hasError('required')">Obrigatório</mat-error>
+        </mat-form-field>
+      </ng-container>
+    </div>
+
+    <div class="submit">
+      <button mat-raised-button color="primary" type="submit" [disabled]="form.invalid || loading()">
+        <mat-icon>play_arrow</mat-icon>
+        Analisar
+      </button>
+    </div>
+  </form>
+
+  <mat-card *ngIf="result()" class="result">
+    <h2>Resultado</h2>
+    <div class="row">
+      <mat-chip-set>
+        <mat-chip [color]="result()?.diagnosis === 'Maligno' ? 'warn' : 'primary'" selected>
+          {{ result()?.diagnosis }}
+        </mat-chip>
+      </mat-chip-set>
+    </div>
+    <div class="row conf">
+      <span>Confiança: {{ (result()?.confidence ?? 0) | percent:'1.0-2' }}</span>
+      <mat-progress-bar mode="determinate" [value]="(result()?.confidence ?? 0) * 100"></mat-progress-bar>
+    </div>
+  </mat-card>
+
+  <!-- CHAT MULTI-TURNO -->
+  <div *ngIf="chatMessages().length > 0" class="chat-box">
+    <div *ngFor="let msg of chatMessages()">
+      <div [ngClass]="{'user-msg': msg.role === 'user', 'bot-msg': msg.role === 'bot'}">
+        {{ msg.text }}
+      </div>
+    </div>
+
+    <div class="chat-input">
+      <mat-form-field appearance="outline" class="chat-field">
+        <input
+          matInput
+          placeholder="Digite sua mensagem..."
+          [(ngModel)]="userMessage"
+          (keyup.enter)="sendMessage()" />
+      </mat-form-field>
+      <button mat-icon-button color="primary" (click)="sendMessage()">
+        <mat-icon>send</mat-icon>
+      </button>
+    </div>
+  </div>
+</mat-card>
